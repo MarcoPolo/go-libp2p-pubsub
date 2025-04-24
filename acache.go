@@ -82,7 +82,7 @@ func (sl *sendList) Has(mid string) bool {
 }
 
 type AnnounceCache struct {
-	lk sync.RWMutex
+	lk sync.Mutex
 	// Queues indexed by messages ids containing the peers from whom we already receive IANNOUNCE, but not yet send INEED.
 	m map[string][]peer.ID
 	// List of pairs of peers and message ids that we already send INEED, but the timeout hasn't occured and the message is not received yet.
@@ -117,7 +117,7 @@ func NewAnnounceCache(timeout time.Duration) *AnnounceCache {
 }
 
 func (ac *AnnounceCache) background(c <-chan *IneedMeta, R chan<- *IneedMeta, T chan<- *IneedMeta) {
-	timer := time.NewTimer(0)
+	timer := time.NewTimer(time.Minute)
 	for {
 		select {
 		case <-ac.stopped:
@@ -182,7 +182,12 @@ func (ac *AnnounceCache) background(c <-chan *IneedMeta, R chan<- *IneedMeta, T 
 		timer.Stop()
 		if entry = ac.sl.Front(); entry != nil {
 			// If there still the next entry, wake this background routine correspondingly
-			timer.Reset(time.Until(entry.expiryTime))
+			duration := time.Until(entry.expiryTime)
+			if duration <= 0 {
+				// Handle the degenerate case
+				duration = 1 * time.Microsecond
+			}
+			timer.Reset(duration)
 		}
 		ac.lk.Unlock()
 	}
