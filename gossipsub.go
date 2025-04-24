@@ -1344,10 +1344,11 @@ func (gs *GossipSubRouter) Publish(msg *Message) {
 		}
 
 		// toss a coin to decide whether to send eagerly or lazily
+		var out *RPC
 		if gs.params.D > 0 && rand.Intn(gs.params.D) < gs.params.Dannounce {
-			gs.sendRPC(pid, lazyOut, false)
+			out = lazyOut
 		} else {
-			gs.sendRPC(pid, eagerOut, false)
+			out = eagerOut
 		}
 		if msg.messageBatch != nil {
 			msg.messageBatch.addMsg(pid, gs.p.idGen.ID(msg), out)
