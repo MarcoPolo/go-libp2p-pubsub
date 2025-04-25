@@ -1244,6 +1244,10 @@ func (gs *GossipSubRouter) connector() {
 }
 
 func (gs *GossipSubRouter) Publish(msg *Message) {
+	if msg.messageBatch != nil {
+		defer msg.messageBatch.doneWithMsg()
+	}
+
 	gs.mcache.Put(msg)
 
 	from := msg.ReceivedFrom
@@ -1351,7 +1355,7 @@ func (gs *GossipSubRouter) Publish(msg *Message) {
 			out = eagerOut
 		}
 		if msg.messageBatch != nil {
-			msg.messageBatch.addMsg(pid, gs.p.idGen.ID(msg), out)
+			msg.messageBatch.queueRPC(pid, gs.p.idGen.ID(msg), out)
 			continue
 		}
 		gs.sendRPC(pid, out, false)
@@ -2356,8 +2360,12 @@ type pendingRPC struct {
 // message before sending more copies. This helps bandwidth constrained peers.
 type MessageBatch struct {
 	sync.Mutex
-	sendRPC func(peer peer.ID, rpc *RPC, urgent bool)
-	rpcs    map[string][]pendingRPC
+	// PendingRPCsToAdd is a waitgroup that is used to wait for all the RPCs to
+	// be added to the batch. This library's publish is async, so we need to be
+	// careful to not publish the batch before all the RPCs are added.
+	pendingRPCsToAdd sync.WaitGroup
+	sendRPC          func(peer peer.ID, rpc *RPC, urgent bool)
+	rpcs             map[string][]pendingRPC
 }
 
 // NewMessageBatch creates a new MessageBatch. This only works for GossipSub.
@@ -2375,6 +2383,7 @@ func NewMessageBatch(ps *PubSub) (*MessageBatch, error) {
 
 // Add adds a message to the batch.
 func (p *MessageBatch) Add(ctx context.Context, topic *Topic, data []byte, opts ...PubOpt) error {
+	p.pendingRPCsToAdd.Add(1)
 	opts = append(opts, func(o *PublishOptions) error {
 		o.messageBatch = p
 		return nil
@@ -2389,6 +2398,7 @@ func (p *MessageBatch) Add(ctx context.Context, topic *Topic, data []byte, opts 
 // at least the expected number of batched messages per peer plus some slack to
 // account for gossip messages.
 func (p *MessageBatch) Publish() {
+	p.pendingRPCsToAdd.Wait()
 	p.Lock()
 	defer p.Unlock()
 
@@ -2404,7 +2414,11 @@ func (p *MessageBatch) Publish() {
 	}
 }
 
-func (p *MessageBatch) addMsg(peer peer.ID, msgID string, rpc *RPC) {
+func (p *MessageBatch) doneWithMsg() {
+	p.pendingRPCsToAdd.Done()
+}
+
+func (p *MessageBatch) queueRPC(peer peer.ID, msgID string, rpc *RPC) {
 	p.Lock()
 	defer p.Unlock()
 	if p.rpcs == nil {

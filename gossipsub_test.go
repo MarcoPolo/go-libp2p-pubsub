@@ -4460,7 +4460,7 @@ func TestMessageBatchPublishesRarestFirst(t *testing.T) {
 
 		for i := 0; i < int(numMessages); i++ {
 			for j := 0; j < int(numPeers); j++ {
-				batch.addMsg(peers[j], fmt.Sprintf("msg%d", i), &RPC{
+				batch.queueRPC(peers[j], fmt.Sprintf("msg%d", i), &RPC{
 					RPC: pb.RPC{
 						Publish: []*pb.Message{
 							{
@@ -4545,7 +4545,7 @@ func BenchmarkMessageBatchPublish(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		j := i % len(peers)
 		msgIdx := i % numMessages
-		batch.addMsg(peers[j], msgs[msgIdx], emptyRPC)
+		batch.queueRPC(peers[j], msgs[msgIdx], emptyRPC)
 		if i%100 == 0 {
 			batch.Publish()
 		}
@@ -4615,4 +4615,60 @@ func TestMessageBatchPublish(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestMessageBatchAsyncAddMsg(t *testing.T) {
+	// Multiple runs because this is racey
+	const runs = 10
+	const expectedNumRPCsPerPeer = 10
+
+	peerCounts := []int{2, 3, 5}
+
+	for _, numPeers := range peerCounts {
+		t.Run(fmt.Sprintf("%d hosts", numPeers), func(t *testing.T) {
+			hosts := getDefaultHosts(t, numPeers)
+			psubs := getGossipsubs(context.Background(), hosts)
+			denseConnect(t, hosts)
+
+			var publisherTopic *Topic
+			for i, psub := range psubs {
+				topic, err := psub.Join("foobar")
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = topic.Subscribe(WithBufferSize(runs * expectedNumRPCsPerPeer))
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if i == 0 {
+					publisherTopic = topic
+				}
+			}
+			// Give the nodes a second to bootstrap
+			time.Sleep(2 * time.Second)
+
+			for range runs {
+				var sentRPCs atomic.Int32
+				b, err := NewMessageBatch(psubs[0])
+				if err != nil {
+					t.Fatal(err)
+				}
+				b.sendRPC = func(peer peer.ID, rpc *RPC, urgent bool) {
+					sentRPCs.Add(1)
+				}
+
+				// publisher
+				for i := range expectedNumRPCsPerPeer {
+					b.Add(context.Background(), publisherTopic, []byte(fmt.Sprintf("msg%d", i)))
+				}
+				b.Publish()
+
+				if sentRPCs.Load() != int32(expectedNumRPCsPerPeer*(numPeers-1)) {
+					t.Fatalf("expected %d RPCs, got %d", expectedNumRPCsPerPeer, sentRPCs.Load())
+				}
+			}
+		})
+	}
+
 }
