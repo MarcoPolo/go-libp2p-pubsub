@@ -79,6 +79,7 @@ var (
 	GossipSubGraftFloodThreshold              = 10 * time.Second
 	GossipSubMaxIHaveLength                   = 5000
 	GossipSubMaxIHaveMessages                 = 10
+	GossipSubMaxPendingIWants                 = 1
 	GossipSubMaxIDontWantLength               = 10
 	GossipSubMaxIDontWantMessages             = 1000
 	GossipSubIWantFollowupTime                = 3 * time.Second
@@ -258,6 +259,12 @@ type GossipSubParams struct {
 
 	// IDONTWANT is cleared when it's older than the TTL.
 	IDontWantMessageTTL int
+
+	// MaxPendingIWants is the maximum number of pending IWANT requests allowed per message ID.
+	// This helps limit the number of duplicates we'll receive from peers.
+	// TODO: Add tracking to penalize peers that fail to fulfill IWANT requests.
+	// TODO: Add a timeout option to retry an IWANT request from another peer.
+	MaxPendingIWants int
 }
 
 // NewGossipSub returns a new PubSub object using the default GossipSubRouter as the router.
@@ -297,6 +304,8 @@ func DefaultGossipSubRouter(h host.Host) *GossipSubRouter {
 		tagTracer:    newTagTracer(h.ConnManager()),
 		params:       params,
 		timelyGossip: make(chan string),
+		// number of pending IWANTs per message ID
+		pendingIWants: make(map[string]int),
 	}
 }
 
@@ -337,6 +346,7 @@ func DefaultGossipSubParams() GossipSubParams {
 		IWantFollowupTime:         GossipSubIWantFollowupTime,
 		IDontWantMessageThreshold: GossipSubIDontWantMessageThreshold,
 		IDontWantMessageTTL:       GossipSubIDontWantMessageTTL,
+		MaxPendingIWants:          GossipSubMaxPendingIWants,
 		SlowHeartbeatWarning:      0.1,
 	}
 }
@@ -503,6 +513,8 @@ type GossipSubRouter struct {
 	backoff      map[string]map[peer.ID]time.Time // prune backoff
 	connect      chan connectInfo                 // px connection requests
 	cab          peerstore.AddrBook
+	// number of pending IWANTs per message ID
+	pendingIWants map[string]int
 
 	protos  []protocol.ID
 	feature GossipSubFeatureTest
@@ -852,7 +864,15 @@ func (gs *GossipSubRouter) handleIHave(p peer.ID, ctl *pb.ControlMessage) []*pb.
 			if gs.p.seenMessage(mid) {
 				continue
 			}
+
+			// Check if we've exceeded the maximum number of pending IWANTs for this message
+			if gs.pendingIWants[mid] >= gs.params.MaxPendingIWants {
+				log.Debugf("IHAVE: ignoring request for message %s from peer %s; too many pending IWANTs", mid, p)
+				continue
+			}
+
 			iwant[mid] = struct{}{}
+			gs.pendingIWants[mid]++
 		}
 	}
 
@@ -1252,6 +1272,8 @@ func (gs *GossipSubRouter) Publish(msg *Message) {
 	if msg.messageBatch != nil {
 		defer msg.messageBatch.doneWithMsg()
 	}
+	mid := gs.p.idGen.ID(msg)
+	delete(gs.pendingIWants, mid)
 
 	gs.mcache.Put(msg)
 
@@ -1320,7 +1342,7 @@ func (gs *GossipSubRouter) Publish(msg *Message) {
 		}
 	}
 
-	mid := gs.p.idGen.ID(msg)
+	mid = gs.p.idGen.ID(msg)
 	iannounce := []*pb.ControlIAnnounce{{TopicID: &topic, MessageID: &mid}}
 	lazyOut := rpcWithControl(nil, nil, nil, nil, nil, nil, iannounce, nil)
 
