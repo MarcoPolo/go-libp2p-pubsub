@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -295,6 +296,7 @@ func DefaultGossipSubRouter(h host.Host) *GossipSubRouter {
 		feature:      GossipSubDefaultFeatures,
 		tagTracer:    newTagTracer(h.ConnManager()),
 		params:       params,
+		timelyGossip: make(chan string),
 	}
 }
 
@@ -545,6 +547,9 @@ type GossipSubRouter struct {
 	// number of heartbeats since the beginning of time; this allows us to amortize some resource
 	// clean up -- eg backoff clean up.
 	heartbeatTicks uint64
+
+	timelyGossip chan string         // channel for requesting extra gossip emissions
+	extraGossip  map[string]struct{} // tracks which topics have had extra emissions this heartbeat
 }
 
 type connectInfo struct {
@@ -1354,11 +1359,21 @@ func (gs *GossipSubRouter) Publish(msg *Message) {
 		} else {
 			out = eagerOut
 		}
+		id := gs.p.idGen.ID(msg)
 		if msg.messageBatch != nil {
-			msg.messageBatch.queueRPC(pid, gs.p.idGen.ID(msg), out)
+			msg.messageBatch.queueRPC(pid, id, out)
 			continue
 		}
 		gs.sendRPC(pid, out, false)
+
+	}
+
+	if len(tosend) > 0 {
+		// Only for mesh topics
+		_, ok = gs.mesh[topic]
+		if ok {
+			gs.timelyGossip <- topic
+		}
 	}
 }
 
@@ -1676,13 +1691,43 @@ func (gs *GossipSubRouter) heartbeatTimer() {
 			case <-gs.p.ctx.Done():
 				return
 			}
+		case topic := <-gs.timelyGossip:
+			gs.doTimelyGossip(topic)
 		case <-gs.p.ctx.Done():
 			return
 		}
 	}
 }
 
+func (gs *GossipSubRouter) doTimelyGossip(topic string) {
+	// Only for mesh topics
+	meshPeers, ok := gs.mesh[topic]
+	if !ok {
+		return
+	}
+
+	// Skip if we've already done an extra emission for this topic this heartbeat
+	if _, done := gs.extraGossip[topic]; done {
+		return
+	}
+
+	// Mark this topic as having had extra gossip this heartbeat
+	if gs.extraGossip == nil {
+		gs.extraGossip = make(map[string]struct{})
+	}
+	gs.extraGossip[topic] = struct{}{}
+
+	// Emit gossip. Not sending to mesh peers as they already receive the message via push
+	enqueued := gs.emitGossip(topic, meshPeers)
+	if enqueued {
+		gs.flush()
+	}
+}
+
 func (gs *GossipSubRouter) heartbeat() {
+	// Clear extra emission tracking at start of heartbeat
+	clear(gs.extraGossip)
+
 	start := time.Now()
 	defer func() {
 		if gs.params.SlowHeartbeatWarning > 0 {
@@ -2068,14 +2113,9 @@ func (gs *GossipSubRouter) sendGraftPrune(tograft, toprune map[peer.ID][]string,
 
 // emitGossip emits IHAVE gossip advertising items in the message cache window
 // of this topic.
-func (gs *GossipSubRouter) emitGossip(topic string, exclude map[peer.ID]struct{}) {
-	mids := gs.mcache.GetGossipIDs(topic)
-	if len(mids) == 0 {
-		return
-	}
-
-	// shuffle to emit in random order
-	shuffleStrings(mids)
+func (gs *GossipSubRouter) emitGossip(topic string, exclude map[peer.ID]struct{}) bool {
+	var enqueued bool
+	mids := make([]string, 0, gs.params.MaxIHaveLength)
 
 	// if we are emitting more than GossipSubMaxIHaveLength mids, truncate the list
 	if len(mids) > gs.params.MaxIHaveLength {
@@ -2111,17 +2151,28 @@ func (gs *GossipSubRouter) emitGossip(topic string, exclude map[peer.ID]struct{}
 
 	// Emit the IHAVE gossip to the selected peers.
 	for _, p := range peers {
-		peerMids := mids
+		mids = mids[:0]
+		mids = gs.mcache.AppendGossipIDs(mids, topic, p)
+		if len(mids) == 0 {
+			continue
+		}
 		if len(mids) > gs.params.MaxIHaveLength {
+			shuffleStrings(mids)
 			// we do this per peer so that we emit a different set for each peer.
 			// we have enough redundancy in the system that this will significantly increase the message
 			// coverage when we do truncate.
-			peerMids = make([]string, gs.params.MaxIHaveLength)
-			shuffleStrings(mids)
-			copy(peerMids, mids)
+			mids = mids[:gs.params.MaxIHaveLength]
 		}
+		for _, mid := range mids {
+			gs.mcache.RecordGossipEmission(mid, p)
+		}
+
+		// We clone the slice here because the control message will own the slice.
+		peerMids := slices.Clone(mids)
 		gs.enqueueGossip(p, &pb.ControlIHave{TopicID: &topic, MessageIDs: peerMids})
+		enqueued = true
 	}
+	return enqueued
 }
 
 func (gs *GossipSubRouter) flush() {
@@ -2425,4 +2476,27 @@ func (p *MessageBatch) queueRPC(peer peer.ID, msgID string, rpc *RPC) {
 		p.rpcs = make(map[string][]pendingRPC)
 	}
 	p.rpcs[msgID] = append(p.rpcs[msgID], pendingRPC{peer: peer, rpc: rpc})
+}
+
+type TimelyGossip struct {
+	gs *GossipSubRouter
+}
+
+func NewTimelyGossip(ps *PubSub) (TimelyGossip, error) {
+	if ps == nil {
+		return TimelyGossip{}, errors.New("pubsub is nil")
+	}
+	if gs, ok := ps.rt.(*GossipSubRouter); ok {
+		return TimelyGossip{gs: gs}, nil
+	}
+	return TimelyGossip{}, errors.New("pubsub is not a GossipSubRouter")
+}
+
+// TryTimelyGossip requests an immediate gossip emission for the given topic.
+// The gossip will only be emitted if the topic hasn't had an extra emission in the current heartbeat.
+func (t *TimelyGossip) TryTimelyGossip(topic string) {
+	select {
+	case t.gs.timelyGossip <- topic:
+	case <-t.gs.p.ctx.Done():
+	}
 }

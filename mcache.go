@@ -32,6 +32,7 @@ func NewMessageCache(gossip, history int) *MessageCache {
 		msgID: func(msg *Message) string {
 			return DefaultMsgIdFn(msg.Message)
 		},
+		ihave: make(map[string]map[peer.ID]struct{}),
 	}
 }
 
@@ -41,6 +42,7 @@ type MessageCache struct {
 	history [][]CacheEntry
 	gossip  int
 	msgID   func(*Message) string
+	ihave   map[string]map[peer.ID]struct{}
 }
 
 func (mc *MessageCache) SetMsgIdFn(msgID func(*Message) string) {
@@ -79,26 +81,46 @@ func (mc *MessageCache) GetForPeer(mid string, p peer.ID) (*Message, int, bool) 
 	return m, tx[p], true
 }
 
-func (mc *MessageCache) GetGossipIDs(topic string) []string {
-	var mids []string
-	for _, entries := range mc.history[:mc.gossip] {
-		for _, entry := range entries {
-			if entry.topic == topic {
-				mids = append(mids, entry.mid)
-			}
-		}
-	}
-	return mids
-}
-
 func (mc *MessageCache) Shift() {
 	last := mc.history[len(mc.history)-1]
 	for _, entry := range last {
 		delete(mc.msgs, entry.mid)
 		delete(mc.peertx, entry.mid)
+		delete(mc.ihave, entry.mid)
 	}
 	for i := len(mc.history) - 2; i >= 0; i-- {
 		mc.history[i+1] = mc.history[i]
 	}
 	mc.history[0] = nil
+}
+
+// RecordGossipEmission records that we informed peer about message mid
+func (mc *MessageCache) RecordGossipEmission(mid string, p peer.ID) {
+	peers, ok := mc.ihave[mid]
+	if !ok {
+		peers = make(map[peer.ID]struct{})
+		mc.ihave[mid] = peers
+	}
+	peers[p] = struct{}{}
+}
+
+// AppendGossipIDs returns message IDs for a topic that haven't been advertised to the peer
+func (mc *MessageCache) AppendGossipIDs(msgIDSlice []string, topic string, p peer.ID) []string {
+	for _, entries := range mc.history[:mc.gossip] {
+		for _, entry := range entries {
+			if entry.topic == topic {
+				// Check if we haven't informed this peer about this message
+				if peers, ok := mc.ihave[entry.mid]; !ok || !hasPeer(peers, p) {
+					msgIDSlice = append(msgIDSlice, entry.mid)
+				}
+			}
+		}
+	}
+
+	return msgIDSlice
+}
+
+func hasPeer(peers map[peer.ID]struct{}, p peer.ID) bool {
+	_, ok := peers[p]
+	return ok
 }
