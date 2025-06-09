@@ -160,6 +160,8 @@ func (p *PubSub) handleSendingMessages(ctx context.Context, s network.Stream, ou
 	writeRpc := func(rpc *RPC) error {
 		size := uint64(rpc.Size())
 
+		p.tracer.WriteRPC(rpc, s.Conn().RemotePeer())
+
 		buf := pool.Get(varint.UvarintSize(size) + int(size))
 		defer pool.Put(buf)
 

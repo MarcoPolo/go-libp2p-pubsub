@@ -274,6 +274,28 @@ func (t *pubsubTracer) RecvRPC(rpc *RPC) {
 	t.tracer.Trace(evt)
 }
 
+func (t *pubsubTracer) WriteRPC(rpc *RPC, p peer.ID) {
+	if t == nil {
+		return
+	}
+
+	if t.tracer == nil {
+		return
+	}
+
+	now := time.Now().UnixNano()
+	evt := &pb.TraceEvent{
+		Type:      pb.TraceEvent_WRITE_RPC.Enum(),
+		PeerID:    []byte(t.pid),
+		Timestamp: &now,
+		WriteRPC: &pb.TraceEvent_WriteRPC{
+			SendTo: []byte(p),
+			Meta:   t.traceRPCMeta(rpc),
+		},
+	}
+	t.tracer.Trace(evt)
+}
+
 func (t *pubsubTracer) SendRPC(rpc *RPC, p peer.ID) {
 	if t == nil {
 		return
