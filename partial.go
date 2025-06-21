@@ -24,6 +24,7 @@ type PartialMessage interface {
 	Key() string
 	Merge(PartialMessage) error
 	Split(metadata []byte) iter.Seq[PartialMessage]
+	PartialIWantMetadata() ([]byte, error)
 	GroupID() PartialMessageGroupID
 	Marshal() ([]byte, error)
 	IsComplete() bool
@@ -234,6 +235,12 @@ func TrackPartialMessage(pubsub *PubSub, topic string, partialMsg PartialMessage
 			rt.partialMessages.handlePartialMessage(topic, partialMsg)
 		}
 	}
+
+	md, err := partialMsg.PartialIWantMetadata()
+	if err != nil {
+		return err
+	}
+	SendPartialIWANT(pubsub, topic, partialMsg.GroupID(), md)
 
 	return nil
 }

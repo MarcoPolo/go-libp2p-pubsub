@@ -55,6 +55,17 @@ type mockPartialMessage struct {
 	Chunks        [][]byte
 }
 
+// PartialIWantMetadata implements PartialMessage.
+func (p *mockPartialMessage) PartialIWantMetadata() ([]byte, error) {
+	var mockMetadata mockMetadata
+	for i, chunk := range p.Chunks {
+		if chunk == nil {
+			mockMetadata.ToInclude = append(mockMetadata.ToInclude, i)
+		}
+	}
+	return mockMetadata.Marshal()
+}
+
 type mockMetadata struct {
 	ToInclude []int
 }
@@ -223,6 +234,7 @@ func TestPartialIWANT(t *testing.T) {
 		WithNoAuthor(),
 		WithMessageIdFn(msgID))
 	psubs[2] = getGossipsub(ctx, hosts[2],
+		WithPartialMessagesExtension(partialMessageSettings),
 		WithMessageSignaturePolicy(StrictNoSign),
 		WithNoAuthor(),
 		WithMessageIdFn(msgID))
@@ -251,15 +263,7 @@ func TestPartialIWANT(t *testing.T) {
 	connect(t, hosts[1], hosts[0])
 	time.Sleep(1 * time.Second)
 
-	md := mockMetadata{
-		ToInclude: []int{1},
-	}
-	mdBytes, err := md.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
 	groupID := msg1.GroupID()
-
 	partialChunks := make([][]byte, len(msg1.Chunks))
 	// We already have the first chunk
 	partialChunks[0] = msg1.Chunks[0]
@@ -268,11 +272,6 @@ func TestPartialIWANT(t *testing.T) {
 		topic:         topicString,
 		Chunks:        partialChunks,
 	})
-
-	err = SendPartialIWANT(psubs[0], topicString, groupID, mdBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	msg1Bytes, err := msg1.Marshal()
 	if err != nil {
