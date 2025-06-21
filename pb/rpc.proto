@@ -12,6 +12,8 @@ message RPC {
 	}
 
 	optional ControlMessage control = 3;
+
+	optional PartialMessagesExtension partial = 4;
 }
 
 message Message {
@@ -60,4 +62,28 @@ message ControlIDontWant {
 message PeerInfo {
 	optional bytes peerID = 1;
 	optional bytes signedPeerRecord = 2;
+}
+
+// Support for partial messages
+message PartialMessagesExtension {
+  optional PartialMessage message = 1;
+  optional PartialIWANT iwant = 2;
+  optional PartialIDONTWANT idontwant = 3;
+}
+
+message PartialMessage {
+	optional bytes topicID = 1;
+    optional bytes data = 2;
+}
+
+message PartialIWANT {
+	optional bytes topicID = 1;
+    optional bytes groupID = 2;
+    optional bytes metadata = 3;
+}
+
+message PartialIDONTWANT {
+	optional bytes topicID = 1;
+    optional bytes groupID = 2;
+    optional bytes metadata = 3;
 }

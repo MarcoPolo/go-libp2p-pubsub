@@ -521,6 +521,9 @@ type GossipSubRouter struct {
 	// number of heartbeats since the beginning of time; this allows us to amortize some resource
 	// clean up -- eg backoff clean up.
 	heartbeatTicks uint64
+
+	// Extensions:
+	partialMessages *partialMessageExtension
 }
 
 var _ BatchPublisher = &GossipSubRouter{}
@@ -742,6 +745,13 @@ func (gs *GossipSubRouter) Preprocess(from peer.ID, msgs []*Message) {
 }
 
 func (gs *GossipSubRouter) HandleRPC(rpc *RPC) {
+	if gs.partialMessages != nil {
+		err := gs.partialMessages.handleRPC(rpc)
+		if err != nil {
+			log.Errorf("error handling partial message RPC: %v", err)
+		}
+	}
+
 	ctl := rpc.GetControl()
 	if ctl == nil {
 		return
@@ -1161,6 +1171,14 @@ func (gs *GossipSubRouter) PublishBatch(messages []*Message, opts *BatchPublishO
 }
 
 func (gs *GossipSubRouter) Publish(msg *Message) {
+	if gs.partialMessages != nil {
+		err := gs.partialMessages.HandleValidatedMessage(msg)
+		if err != nil {
+			log.Debugf("error handling validated message in the partial message extension: %s", err)
+		}
+
+	}
+
 	for p, rpc := range gs.rpcs(msg) {
 		gs.sendRPC(p, rpc, false)
 	}
