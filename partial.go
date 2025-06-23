@@ -13,9 +13,7 @@ type PartialMessageGroupID []byte
 
 // Application defined
 type PartialMessageExtensionSettings struct {
-	Validator  PartialMessageValidator
-	GetMessage func(groupID PartialMessageGroupID) (*Message, error)
-
+	Validator               PartialMessageValidator
 	SplitMessage            func(message *Message) (PartialMessage, error)
 	UnmarshalPartialMessage func(topic, data []byte) (PartialMessage, error)
 }
