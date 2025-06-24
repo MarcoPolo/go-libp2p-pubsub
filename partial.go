@@ -16,6 +16,8 @@ type PartialMessageExtensionSettings struct {
 	Validator               PartialMessageValidator
 	SplitMessage            func(message *Message) (PartialMessage, error)
 	UnmarshalPartialMessage func(topic, data []byte) (PartialMessage, error)
+
+	// TODO: add a way to validate partial IWANTs?
 }
 
 type PartialMessage interface {
