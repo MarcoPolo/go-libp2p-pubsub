@@ -1,6 +1,7 @@
 package pubsub
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	crand "crypto/rand"
@@ -19,7 +20,9 @@ import (
 	"testing/quick"
 	"time"
 
+	"github.com/gogo/protobuf/proto"
 	pb "github.com/libp2p/go-libp2p-pubsub/pb"
+	"github.com/multiformats/go-varint"
 
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -3885,4 +3888,102 @@ func BenchmarkSplitRPCLargeMessages(b *testing.B) {
 			}
 		}
 	})
+}
+
+func TestExtensionsControlMessage(t *testing.T) {
+	for _, wellBehaved := range []bool{true, false} {
+		t.Run(fmt.Sprintf("wellBehaved=%t", wellBehaved), func(t *testing.T) {
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			hosts := getDefaultHosts(t, 2)
+			psub0 := getGossipsub(ctx, hosts[0],
+				WithPeerScore(
+					&PeerScoreParams{
+						AppSpecificScore:       func(peer.ID) float64 { return 0 },
+						BehaviourPenaltyWeight: -1,
+						BehaviourPenaltyDecay:  ScoreParameterDecay(time.Minute),
+						DecayInterval:          DefaultDecayInterval,
+						DecayToZero:            DefaultDecayToZero,
+					},
+					&PeerScoreThresholds{
+						GossipThreshold:   -100,
+						PublishThreshold:  -500,
+						GraylistThreshold: -1000,
+					}),
+				WithMessageIdFn(func(msg *pb.Message) string {
+					return string(msg.Data)
+				}))
+
+			hosts1Msgs := make(chan *pb.RPC, 10)
+			hosts[1].SetStreamHandler(GossipSubDefaultProtocols[0], func(s network.Stream) {
+				defer s.Close()
+				rdr := bufio.NewReader(s)
+				for {
+					msgSize, err := varint.ReadUvarint(rdr)
+					if err != nil {
+						return
+					}
+					msgBytes := make([]byte, msgSize)
+					if _, err := io.ReadFull(rdr, msgBytes); err != nil {
+						t.Fatal(err)
+					}
+					var rpc pb.RPC
+					err = proto.Unmarshal(msgBytes, &rpc)
+					if err != nil {
+						t.Fatal(err)
+					}
+					hosts1Msgs <- &rpc
+				}
+			})
+
+			connect(t, hosts[0], hosts[1])
+			time.Sleep(time.Second)
+
+			go func() {
+				s, err := hosts[1].NewStream(ctx, hosts[0].ID(), GossipSubDefaultProtocols[0])
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer s.Close()
+
+				loopTimes := 3
+
+				for i := range loopTimes {
+					rpcToSend := &pb.RPC{
+						Control: &pb.ControlMessage{
+							Extensions: &pb.ControlExtensions{},
+						},
+					}
+					if wellBehaved && i > 0 {
+						// A well behaved node does not repeat the control
+						// extension message
+						rpcToSend.Control.Extensions = nil
+					}
+					toSendBytes, err := proto.Marshal(rpcToSend)
+					if err != nil {
+						t.Fatal(err)
+					}
+					varintBuf := make([]byte, 4)
+					n := varint.PutUvarint(varintBuf, uint64(len(toSendBytes)))
+					s.Write(varintBuf[:n])
+					s.Write(toSendBytes)
+				}
+			}()
+
+			time.Sleep(time.Second)
+
+			peerScore := psub0.rt.(*GossipSubRouter).score.Score(hosts[1].ID())
+			t.Log("Peer score:", peerScore)
+			if wellBehaved {
+				if peerScore < 0 {
+					t.Fatal("Peer score should not be negative")
+				}
+			} else {
+				if peerScore >= 0 {
+					t.Fatal("Peer score should not be positive")
+				}
+			}
+		})
+	}
 }

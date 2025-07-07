@@ -29,6 +29,7 @@ message ControlMessage {
 	repeated ControlGraft graft = 3;
 	repeated ControlPrune prune = 4;
 	repeated ControlIDontWant idontwant = 5;
+	optional ControlExtensions extensions = 6;
 }
 
 message ControlIHave {
@@ -56,6 +57,15 @@ message ControlIDontWant {
 	// implementors from other languages should use bytes here - go protobuf emits invalid utf8 strings
 	repeated string messageIDs = 1;
 }
+
+message ControlExtensions {
+  // Initially empty. Future extensions will be added here along with a
+  // reference to their specification.
+
+  // Experimental extensions must use field numbers larger than 0x200000 to be
+  // encoded with 4 bytes
+}
+
 
 message PeerInfo {
 	optional bytes peerID = 1;

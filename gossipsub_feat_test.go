@@ -24,6 +24,9 @@ func TestDefaultGossipSubFeatures(t *testing.T) {
 	if !GossipSubDefaultFeatures(GossipSubFeatureMesh, GossipSubID_v12) {
 		t.Fatal("gossipsub-v1.2 should support Mesh")
 	}
+	if !GossipSubDefaultFeatures(GossipSubFeatureMesh, GossipSubID_v13) {
+		t.Fatal("gossipsub-v1.3 should support Mesh")
+	}
 
 	if GossipSubDefaultFeatures(GossipSubFeaturePX, FloodSubID) {
 		t.Fatal("floodsub should not support PX")
@@ -37,6 +40,9 @@ func TestDefaultGossipSubFeatures(t *testing.T) {
 	if !GossipSubDefaultFeatures(GossipSubFeaturePX, GossipSubID_v12) {
 		t.Fatal("gossipsub-v1.2 should support PX")
 	}
+	if !GossipSubDefaultFeatures(GossipSubFeaturePX, GossipSubID_v13) {
+		t.Fatal("gossipsub-v1.3 should support PX")
+	}
 
 	if GossipSubDefaultFeatures(GossipSubFeatureIdontwant, FloodSubID) {
 		t.Fatal("floodsub should not support IDONTWANT")
@@ -49,6 +55,9 @@ func TestDefaultGossipSubFeatures(t *testing.T) {
 	}
 	if !GossipSubDefaultFeatures(GossipSubFeatureIdontwant, GossipSubID_v12) {
 		t.Fatal("gossipsub-v1.2 should support IDONTWANT")
+	}
+	if !GossipSubDefaultFeatures(GossipSubFeatureIdontwant, GossipSubID_v13) {
+		t.Fatal("gossipsub-v1.3 should support IDONTWANT")
 	}
 }
 
