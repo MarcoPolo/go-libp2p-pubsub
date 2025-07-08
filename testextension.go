@@ -1,0 +1,22 @@
+package pubsub
+
+import (
+	pubsub_pb "github.com/libp2p/go-libp2p-pubsub/pb"
+	"github.com/libp2p/go-libp2p/core/peer"
+)
+
+type testExtension struct {
+	sendRPC func(p peer.ID, r *RPC, urgent bool)
+}
+
+func (e *testExtension) AddPeer(id peer.ID) {
+	e.sendRPC(id, &RPC{
+		RPC: pubsub_pb.RPC{
+			TestExtension: &pubsub_pb.TestExtension{},
+		},
+	}, false)
+}
+
+func (e *testExtension) RemovePeer(id peer.ID) {}
+
+func (e *testExtension) HandleRPC(rpc *RPC) {}

@@ -1,10 +1,12 @@
 package pubsub
 
 import (
+	pubsub_pb "github.com/libp2p/go-libp2p-pubsub/pb"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 type PeerExtensions struct {
+	TestExtension bool
 }
 
 func WithPeerExtensions(exts PeerExtensions) Option {
@@ -24,10 +26,25 @@ func hasPeerExtensions(rpc *RPC) bool {
 }
 
 func peerExtensionsFromRPC(rpc *RPC) PeerExtensions {
-	return PeerExtensions{}
+	out := PeerExtensions{}
+	if hasPeerExtensions(rpc) {
+		out.TestExtension = rpc.Control.Extensions.GetTestExtension()
+	}
+	return out
 }
 
 func (pe *PeerExtensions) RPC() *RPC {
+	if pe.TestExtension {
+		return &RPC{
+			RPC: pubsub_pb.RPC{
+				Control: &pubsub_pb.ControlMessage{
+					Extensions: &pubsub_pb.ControlExtensions{
+						TestExtension: &pe.TestExtension,
+					},
+				},
+			},
+		}
+	}
 	return nil
 }
 
@@ -37,6 +54,7 @@ type extensionsState struct {
 	sentExtensions    map[peer.ID]struct{}
 	reportMisbehavior func(peer.ID)
 	sendRPC           func(p peer.ID, r *RPC, urgent bool)
+	testExtension     testExtension
 }
 
 func newExtensionsState(myExtensions PeerExtensions, reportMisbehavior func(peer.ID), sendRPC func(peer.ID, *RPC, bool)) *extensionsState {
@@ -46,6 +64,7 @@ func newExtensionsState(myExtensions PeerExtensions, reportMisbehavior func(peer
 		sentExtensions:    make(map[peer.ID]struct{}),
 		reportMisbehavior: reportMisbehavior,
 		sendRPC:           sendRPC,
+		testExtension:     testExtension{sendRPC: sendRPC},
 	}
 }
 
@@ -104,11 +123,20 @@ func (es *extensionsState) RemovePeer(id peer.ID) {
 // extensionsAddPeer is only called once we've both sent and received the
 // extensions control message.
 func (es *extensionsState) extensionsAddPeer(id peer.ID) {
+	if es.myExtensions.TestExtension && es.peerExtensions[id].TestExtension {
+		es.testExtension.AddPeer(id)
+	}
 }
 
 // extensionsRemovePeer is always called after extensionsAddPeer.
 func (es *extensionsState) extensionsRemovePeer(id peer.ID) {
+	if es.myExtensions.TestExtension && es.peerExtensions[id].TestExtension {
+		es.testExtension.RemovePeer(id)
+	}
 }
 
 func (es *extensionsState) extensionsHandleRPC(rpc *RPC) {
+	if es.myExtensions.TestExtension && es.peerExtensions[rpc.from].TestExtension {
+		es.testExtension.HandleRPC(rpc)
+	}
 }

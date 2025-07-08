@@ -22,6 +22,7 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	pb "github.com/libp2p/go-libp2p-pubsub/pb"
+	"github.com/libp2p/go-msgio"
 	"github.com/multiformats/go-varint"
 
 	"github.com/libp2p/go-libp2p/core/host"
@@ -3985,5 +3986,119 @@ func TestExtensionsControlMessage(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type skeletonGossipsub struct {
+	outRPC <-chan *pb.RPC
+	inRPC  chan<- *pb.RPC
+}
+
+func newSkeletonGossipsub(ctx context.Context, h host.Host) *skeletonGossipsub {
+	recvRPC := make(chan *pb.RPC, 16)
+	sendRPC := make(chan *pb.RPC, 16)
+
+	h.SetStreamHandler(GossipSubID_v13, func(s network.Stream) {
+		// Open outbound stream to send writes too
+		outboundStream, err := h.NewStream(context.Background(), s.Conn().RemotePeer(), GossipSubID_v13)
+		if err != nil {
+			panic(err)
+		}
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go func(ctx context.Context) {
+			defer outboundStream.Close()
+			w := msgio.NewVarintWriter(outboundStream)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case r := <-sendRPC:
+					b, err := r.Marshal()
+					if err != nil {
+						panic(err)
+					}
+					err = w.WriteMsg(b)
+					if err != nil {
+						panic(err)
+					}
+				}
+			}
+		}(ctx)
+
+		r := msgio.NewVarintReaderSize(s, DefaultMaxMessageSize)
+		for {
+			msgbytes, err := r.ReadMsg()
+			if err != nil {
+				r.ReleaseMsg(msgbytes)
+				if err != io.EOF {
+					s.Reset()
+					log.Debugf("error reading rpc from %s: %s", s.Conn().RemotePeer(), err)
+				} else {
+					// Just be nice. They probably won't read this
+					// but it doesn't hurt to send it.
+					s.Close()
+				}
+
+				return
+			}
+			if len(msgbytes) == 0 {
+				continue
+			}
+
+			rpc := new(pb.RPC)
+			err = rpc.Unmarshal(msgbytes)
+			r.ReleaseMsg(msgbytes)
+			if err != nil {
+				s.Reset()
+				panic(err)
+			}
+			recvRPC <- rpc
+		}
+	})
+
+	return &skeletonGossipsub{
+		outRPC: recvRPC,
+		inRPC:  sendRPC,
+	}
+}
+
+func TestTestExtension(t *testing.T) {
+	hosts := getDefaultHosts(t, 2)
+	psub := getGossipsub(context.Background(), hosts[0], WithPeerExtensions(PeerExtensions{TestExtension: true}))
+	_ = psub
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	psub1 := newSkeletonGossipsub(ctx, hosts[1])
+
+	connect(t, hosts[0], hosts[1])
+
+	const timeout = 3 * time.Second
+	select {
+	case <-time.After(timeout):
+		t.Fatal("Timeout")
+	case r := <-psub1.outRPC:
+		if !*r.Control.Extensions.TestExtension {
+			t.Fatal("Unexpected RPC. First RPC should be the Extensions Control Message")
+		}
+	}
+
+	truePtr := true
+	psub1.inRPC <- &pb.RPC{
+		Control: &pb.ControlMessage{
+			Extensions: &pb.ControlExtensions{
+				TestExtension: &truePtr,
+			},
+		},
+	}
+
+	select {
+	case <-time.After(timeout):
+		t.Fatal("Timeout")
+	case r := <-psub1.outRPC:
+		if r.TestExtension == nil {
+			t.Fatal("Unexpected RPC. Next RPC should be the TestExtension Message")
+		}
 	}
 }
