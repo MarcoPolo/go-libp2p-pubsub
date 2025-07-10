@@ -41,7 +41,7 @@ func (fs *FloodSubRouter) Attach(p *PubSub) {
 	fs.tracer = p.tracer
 }
 
-func (fs *FloodSubRouter) AddPeer(p peer.ID, proto protocol.ID) {
+func (fs *FloodSubRouter) AddPeer(p peer.ID, proto protocol.ID, _ *RPC) {
 	fs.tracer.AddPeer(p, proto)
 }
 

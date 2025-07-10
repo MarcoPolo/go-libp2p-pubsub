@@ -33,19 +33,15 @@ func peerExtensionsFromRPC(rpc *RPC) PeerExtensions {
 	return out
 }
 
-func (pe *PeerExtensions) RPC() *RPC {
+func (pe *PeerExtensions) ExtendRPC(rpc *RPC) {
 	if pe.TestExtension {
-		return &RPC{
-			RPC: pubsub_pb.RPC{
-				Control: &pubsub_pb.ControlMessage{
-					Extensions: &pubsub_pb.ControlExtensions{
-						TestExtension: &pe.TestExtension,
-					},
-				},
-			},
+		if rpc.Control == nil {
+			rpc.Control = &pubsub_pb.ControlMessage{}
+		}
+		rpc.Control.Extensions = &pubsub_pb.ControlExtensions{
+			TestExtension: &pe.TestExtension,
 		}
 	}
-	return nil
 }
 
 type extensionsState struct {
@@ -90,11 +86,10 @@ func (es *extensionsState) HandleRPC(rpc *RPC) {
 	es.extensionsHandleRPC(rpc)
 }
 
-func (es *extensionsState) AddPeer(id peer.ID) {
-	// Send our extensions as the first message
-	if rpc := es.myExtensions.RPC(); rpc != nil {
-		es.sendRPC(id, rpc, true)
-	}
+func (es *extensionsState) AddPeer(id peer.ID, helloPacket *RPC) {
+	// Send our extensions as the first message.
+	es.myExtensions.ExtendRPC(helloPacket)
+
 	es.sentExtensions[id] = struct{}{}
 	if _, ok := es.peerExtensions[id]; ok {
 		// We've just finished sending and receiving the extensions control

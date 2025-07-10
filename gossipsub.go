@@ -635,7 +635,7 @@ func (gs *GossipSubRouter) manageAddrBook() {
 	}
 }
 
-func (gs *GossipSubRouter) AddPeer(p peer.ID, proto protocol.ID) {
+func (gs *GossipSubRouter) AddPeer(p peer.ID, proto protocol.ID, helloPacket *RPC) {
 	log.Debugf("PEERUP: Add new peer %s using %s", p, proto)
 	gs.tracer.AddPeer(p, proto)
 	gs.peers[p] = proto
@@ -664,7 +664,7 @@ loop:
 	gs.outbound[p] = outbound
 
 	if gs.feature(GossipSubFeatureExtensions, proto) {
-		gs.extensions.AddPeer(p)
+		gs.extensions.AddPeer(p, helloPacket)
 	}
 }
 
