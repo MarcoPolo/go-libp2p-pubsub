@@ -3944,7 +3944,7 @@ func TestExtensionsControlMessage(t *testing.T) {
 			go func() {
 				s, err := hosts[1].NewStream(ctx, hosts[0].ID(), GossipSubDefaultProtocols[0])
 				if err != nil {
-					t.Fatal(err)
+					panic(err)
 				}
 				defer s.Close()
 
@@ -3963,7 +3963,7 @@ func TestExtensionsControlMessage(t *testing.T) {
 					}
 					toSendBytes, err := proto.Marshal(rpcToSend)
 					if err != nil {
-						t.Fatal(err)
+						panic(err)
 					}
 					varintBuf := make([]byte, 4)
 					n := varint.PutUvarint(varintBuf, uint64(len(toSendBytes)))
