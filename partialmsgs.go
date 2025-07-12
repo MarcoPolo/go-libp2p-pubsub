@@ -8,9 +8,12 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
-// TODO: Limit number of concurrent PartialIWANTs?
-// TODO: Skip partial IHAVE for now?
-// TODO: I could have a user provided validation queue instead of requiring republishing
+// TODO: Handle PartialIDONTWANT
+// TODO: Add gossip fallback
+// TODO: Limit number of concurrent PartialIWANTs.
+// TODO: Move this to a separate package?
+// Question: Skip partial IHAVE for now?
+// Question: I could have a user provided validation queue instead of requiring republishing
 //   - But a user may need to republish anyways if they get parts out of band
 
 const minGroupTTL = 3
@@ -54,7 +57,10 @@ type partialMessageStatePerTopicGroup struct {
 	peerWants map[peer.ID][]byte
 	peerHas   map[peer.ID][]byte
 	// sentWants tracks the PartialIWants sent to peers
-	sentWants      map[peer.ID][]byte
+	sentWants map[peer.ID][]byte
+	// TODO: sentIHAVEs ?
+	// TODO: received IDONTWANTs map[peer.ID]struct{}
+	// TODO: consolidate this into a single map[peer.ID]partialMessagePeerState
 	partialMessage PartialMessage
 	groupTTL       int
 }
