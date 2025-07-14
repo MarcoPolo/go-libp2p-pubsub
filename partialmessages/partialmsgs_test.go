@@ -16,17 +16,23 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
-type mockNetworkPartialMessages struct {
-	t *testing.T
-	m map[peer.ID][]*RPC
+type rpcWithFrom struct {
+	from peer.ID
+	rpc  *pubsub_pb.PartialMessagesExtension
+}
 
-	allSentMsgs map[peer.ID][]*RPC
+type mockNetworkPartialMessages struct {
+	t           *testing.T
+	pendingMsgs map[peer.ID][]rpcWithFrom
+
+	allSentMsgs map[peer.ID][]rpcWithFrom
 
 	handlers map[peer.ID]*PartialMessageExtension
 }
 
 func (m *mockNetworkPartialMessages) clearMsgs() {
-	m.allSentMsgs = make(map[peer.ID][]*RPC)
+	m.allSentMsgs = make(map[peer.ID][]rpcWithFrom)
+	m.pendingMsgs = make(map[peer.ID][]rpcWithFrom)
 }
 func (m *mockNetworkPartialMessages) addPeers() {
 	for a := range m.handlers {
@@ -54,15 +60,15 @@ func (m *mockNetworkPartialMessages) removePeers() {
 
 func (m *mockNetworkPartialMessages) handleRPCs() bool {
 	for id, h := range m.handlers {
-		if len(m.m[id]) > 0 {
-			var rpc *RPC
-			rpc, m.m[id] = m.m[id][0], m.m[id][1:]
-			h.HandleRPC(rpc)
+		if len(m.pendingMsgs[id]) > 0 {
+			var rpc rpcWithFrom
+			rpc, m.pendingMsgs[id] = m.pendingMsgs[id][0], m.pendingMsgs[id][1:]
+			h.HandleRPC(rpc.from, rpc.rpc)
 		}
 	}
 	moreLeft := false
 	for id := range m.handlers {
-		if len(m.m[id]) > 0 {
+		if len(m.pendingMsgs[id]) > 0 {
 			moreLeft = true
 			break
 		}
@@ -70,13 +76,13 @@ func (m *mockNetworkPartialMessages) handleRPCs() bool {
 	return moreLeft
 }
 
-func (m *mockNetworkPartialMessages) sendRPC(id peer.ID, rpc *RPC, _ bool) {
-	if id == "" {
+func (m *mockNetworkPartialMessages) sendRPC(from, to peer.ID, rpc *pubsub_pb.PartialMessagesExtension, _ bool) {
+	if to == "" {
 		panic("empty peer ID")
 	}
-	fmt.Printf("Sending RPC to %s: %+v\n", id, rpc)
-	m.m[id] = append(m.m[id], rpc)
-	m.allSentMsgs[id] = append(m.allSentMsgs[id], rpc)
+	fmt.Printf("Sending RPC to %s: %+v\n", to, rpc)
+	m.pendingMsgs[to] = append(m.pendingMsgs[to], rpcWithFrom{from, rpc})
+	m.allSentMsgs[to] = append(m.allSentMsgs[to], rpcWithFrom{from, rpc})
 }
 
 const testPartialMessageLeaves = 8
@@ -244,8 +250,8 @@ func newFullTestMessage(topic string, r io.Reader) (*testPartialMessage, error) 
 func TestPartialMessages(t *testing.T) {
 	nw := &mockNetworkPartialMessages{
 		t:           t,
-		m:           make(map[peer.ID][]*RPC),
-		allSentMsgs: make(map[peer.ID][]*RPC),
+		pendingMsgs: make(map[peer.ID][]rpcWithFrom),
+		allSentMsgs: make(map[peer.ID][]rpcWithFrom),
 		handlers:    make(map[peer.ID]*PartialMessageExtension),
 	}
 
@@ -283,9 +289,8 @@ func TestPartialMessages(t *testing.T) {
 		},
 		GroupTTLByHeatbeat: 5,
 
-		sendRPC: func(p peer.ID, r *RPC, urgent bool) {
-			r.from = peer1
-			nw.sendRPC(p, r, urgent)
+		sendRPC: func(p peer.ID, r *pubsub_pb.PartialMessagesExtension, urgent bool) {
+			nw.sendRPC(peer1, p, r, urgent)
 		},
 		topicsForPeer: func(p peer.ID) iter.Seq[string] {
 			return func(yield func(string) bool) {
@@ -304,9 +309,8 @@ func TestPartialMessages(t *testing.T) {
 			yield(peer1)
 		}
 	}
-	h2.sendRPC = func(p peer.ID, r *RPC, urgent bool) {
-		r.from = peer2
-		nw.sendRPC(p, r, urgent)
+	h2.sendRPC = func(p peer.ID, r *pubsub_pb.PartialMessagesExtension, urgent bool) {
+		nw.sendRPC(peer2, p, r, urgent)
 	}
 	h2.NewPartialMessage = func(topic string, groupID []byte) (PartialMessage, error) {
 		return &testPartialMessage{
@@ -326,10 +330,7 @@ func TestPartialMessages(t *testing.T) {
 	assertNoEmptyRPCs := func() {
 		for _, msgs := range nw.allSentMsgs {
 			for _, msg := range msgs {
-				if msg.Partial.Size() == 0 {
-					msg.Partial = nil
-				}
-				if msg.Size() == 0 {
+				if msg.rpc.Size() == 0 {
 					t.Fatal("empty message")
 				}
 			}
@@ -470,7 +471,7 @@ func TestPartialMessages(t *testing.T) {
 
 		emptyMsg := &testPartialMessage{}
 		emptyMetadata, _ := emptyMsg.MissingParts()
-		if bytes.Equal(nw.m[peer1][0].Partial.Iwant.Metadata, emptyMetadata) {
+		if bytes.Equal(nw.pendingMsgs[peer1][0].rpc.Iwant.Metadata, emptyMetadata) {
 			t.Fatal("h2 should not be asking for the full message")
 		}
 
@@ -481,7 +482,7 @@ func TestPartialMessages(t *testing.T) {
 		// Assert that h2 only sent a single Partial IWANT
 		count := 0
 		for _, rpc := range nw.allSentMsgs[peer1] {
-			if rpc.Partial.Iwant != nil {
+			if rpc.rpc.Iwant != nil {
 				count++
 			}
 		}
@@ -543,7 +544,7 @@ func TestPartialMessages(t *testing.T) {
 
 		emptyMsg := &testPartialMessage{}
 		emptyMetadata, _ := emptyMsg.MissingParts()
-		if bytes.Equal(nw.m[peer1][0].Partial.Iwant.Metadata, emptyMetadata) {
+		if bytes.Equal(nw.pendingMsgs[peer1][0].rpc.Iwant.Metadata, emptyMetadata) {
 			t.Fatal("h2 should not be asking for the full message")
 		}
 
@@ -554,7 +555,7 @@ func TestPartialMessages(t *testing.T) {
 		// Assert that h2 only sent a single Partial IWANT
 		count := 0
 		for _, rpc := range nw.allSentMsgs[peer1] {
-			if rpc.Partial.Iwant != nil {
+			if rpc.rpc.Iwant != nil {
 				count++
 			}
 		}
@@ -622,7 +623,7 @@ func TestPartialMessages(t *testing.T) {
 		count := 0
 		for _, rpcs := range nw.allSentMsgs {
 			for _, rpc := range rpcs {
-				if rpc.Partial.Message != nil {
+				if rpc.rpc.Message != nil {
 					count++
 				}
 			}
@@ -662,15 +663,12 @@ func TestPartialMessages(t *testing.T) {
 			}
 		}
 
-		h1.sendRPC(peer2, &RPC{
-			RPC: pubsub_pb.RPC{
-				Partial: &pubsub_pb.PartialMessagesExtension{
-					TopicID:   &topic,
-					GroupID:   fullMsg.GroupID(),
-					Idontwant: &pubsub_pb.PartialIDONTWANT{},
-				},
-			},
-		}, false)
+		h1.sendRPC(peer2,
+			&pubsub_pb.PartialMessagesExtension{
+				TopicID:   &topic,
+				GroupID:   fullMsg.GroupID(),
+				Idontwant: &pubsub_pb.PartialIDONTWANT{},
+			}, false)
 
 		// Handle all RPCs
 		for nw.handleRPCs() {
@@ -686,7 +684,7 @@ func TestPartialMessages(t *testing.T) {
 		// Assert that h2 did not send an IHAVE
 		count := 0
 		for _, rpc := range nw.allSentMsgs[peer1] {
-			if rpc.Partial.Ihave != nil {
+			if rpc.rpc.Ihave != nil {
 				count++
 			}
 		}
