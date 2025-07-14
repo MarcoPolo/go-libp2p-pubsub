@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/libp2p/go-libp2p-pubsub/internal/merkle"
+	pubsub_pb "github.com/libp2p/go-libp2p-pubsub/pb"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -621,6 +622,70 @@ func TestPartialMessages(t *testing.T) {
 		}
 		if count > 0 {
 			t.Fatal("No partial messages should have been sent")
+		}
+	})
+
+	t.Run("h1 sends h2 an IDONTWANT", func(t *testing.T) {
+		defer nw.clearMsgs()
+		nw.addPeers()
+		defer nw.removePeers()
+		defer func() {
+			// Assert no more state is left
+			for range 10 {
+				h1.Heartbeat()
+				h2.Heartbeat()
+			}
+			if len(h1.statePerTopicPerGroup) != 0 || len(h2.statePerTopicPerGroup) != 0 {
+				t.Fatal("h1 and h2 should have cleaned up all their state")
+			}
+		}()
+		defer assertNoEmptyRPCs()
+
+		fullMsg, err := newFullTestMessage(topic, rand)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// h2 only knows part of it
+		h2Msg := &testPartialMessage{Commitment: fullMsg.Commitment, republish: republish(h2)}
+		for i := range h2Msg.Parts {
+			if i%2 == 0 {
+				h2Msg.Parts[i] = fullMsg.Parts[i]
+				h2Msg.Proofs[i] = fullMsg.Proofs[i]
+			}
+		}
+
+		h1.sendRPC(peer2, &RPC{
+			RPC: pubsub_pb.RPC{
+				Partial: &pubsub_pb.PartialMessagesExtension{
+					Idontwant: &pubsub_pb.PartialIDONTWANT{
+						TopicID: &topic,
+						GroupID: fullMsg.GroupID(),
+					},
+				},
+			},
+		}, false)
+
+		// Handle all RPCs
+		for nw.handleRPCs() {
+		}
+
+		// h2 knows the other half
+		h2.PublishPartial(topic, h2Msg, PartialMessagePublishOptions{})
+
+		// Handle all RPCs
+		for nw.handleRPCs() {
+		}
+
+		// Assert that h2 did not send an IHAVE
+		count := 0
+		for _, rpc := range nw.allSentMsgs[peer1] {
+			if rpc.Partial.Ihave != nil {
+				count++
+			}
+		}
+		if count > 0 {
+			t.Fatal("h2 should not have sent an IHAVE")
 		}
 	})
 
