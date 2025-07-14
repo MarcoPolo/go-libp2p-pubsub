@@ -178,11 +178,24 @@ func (pm *testPartialMessage) MissingParts() ([]byte, error) {
 
 }
 
+func (pm *testPartialMessage) ShouldRequest(peerHasMetadata []byte) bool {
+	missingParts, err := pm.MissingParts()
+	if err != nil {
+		return false
+	}
+	var left, right big.Int
+	left.SetBytes(missingParts)
+	right.SetBytes(peerHasMetadata)
+	var zero big.Int
+	return left.And(&left, &right).Cmp(&zero) != 0
+}
+
 // PartialMessageBytesFromMetadata implements PartialMessage.
 func (pm *testPartialMessage) PartialMessageBytesFromMetadata(metadata []byte) ([]byte, []byte, error) {
 	var temp big.Int
 	temp.SetBytes(metadata)
 
+	var added bool
 	var tempMessage testPartialMessage
 	tempMessage.Commitment = pm.Commitment
 	for i := range temp.BitLen() {
@@ -196,7 +209,12 @@ func (pm *testPartialMessage) PartialMessageBytesFromMetadata(metadata []byte) (
 
 			tempMessage.Parts[i] = pm.Parts[i]
 			tempMessage.Proofs[i] = pm.Proofs[i]
+			added = true
 		}
+	}
+
+	if !added {
+		return nil, metadata, nil
 	}
 
 	b, err := json.Marshal(tempMessage)
@@ -545,6 +563,68 @@ func TestPartialMessages(t *testing.T) {
 			t.Fatal("h2 should have the full message")
 		}
 	})
+
+	t.Run("h1 and h2 have the the same half of data. No partial messages should be sent", func(t *testing.T) {
+		defer nw.clearMsgs()
+		nw.addPeers()
+		defer nw.removePeers()
+		defer func() {
+			// Assert no more state is left
+			for range 10 {
+				h1.Heartbeat()
+				h2.Heartbeat()
+			}
+			if len(h1.statePerTopicPerGroup) != 0 || len(h2.statePerTopicPerGroup) != 0 {
+				t.Fatal("h1 and h2 should have cleaned up all their state")
+			}
+		}()
+		defer assertNoEmptyRPCs()
+
+		fullMsg, err := newFullTestMessage(topic, rand)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h1Msg := &testPartialMessage{Commitment: fullMsg.Commitment, republish: republish(h1)}
+		for i := range fullMsg.Parts {
+			if i%2 == 0 {
+				h1Msg.Parts[i] = fullMsg.Parts[i]
+				h1Msg.Proofs[i] = fullMsg.Proofs[i]
+			}
+		}
+
+		// h2 only knows part of it
+		h2Msg := &testPartialMessage{Commitment: fullMsg.Commitment, republish: republish(h2)}
+		for i := range h2Msg.Parts {
+			if i%2 == 0 {
+				h2Msg.Parts[i] = fullMsg.Parts[i]
+				h2Msg.Proofs[i] = fullMsg.Proofs[i]
+			}
+		}
+
+		// h1 knows half
+		h1.PublishPartial(topic, h1Msg, PartialMessagePublishOptions{})
+		// h2 knows the other half
+		h2.PublishPartial(topic, h2Msg, PartialMessagePublishOptions{})
+
+		// Handle all RPCs
+		for nw.handleRPCs() {
+		}
+
+		// Assert that no peer sent a partial message
+		count := 0
+		for _, rpcs := range nw.allSentMsgs {
+			for _, rpc := range rpcs {
+				if rpc.Partial.Message != nil {
+					count++
+				}
+			}
+		}
+		if count > 0 {
+			t.Fatal("No partial messages should have been sent")
+		}
+	})
+
+	// TODO: Add test for a peer has the same stuff we do, and we shouldn't send them a request
 }
 
 func TestTestPartialMessage(t *testing.T) {
