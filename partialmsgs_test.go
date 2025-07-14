@@ -268,9 +268,16 @@ func TestPartialMessages(t *testing.T) {
 				republish:  republish(h1),
 			}, nil
 		},
-		ValidateRequestMetadata: func(topic string, metadata []byte) error {
-			if len(metadata) > 1024 {
-				return errors.New("metadata too large")
+		ValidateRPC: func(_ peer.ID, rpc *pubsub_pb.PartialMessagesExtension) error {
+			if rpc.Ihave != nil {
+				if len(rpc.Ihave.Metadata) > 1024 {
+					return errors.New("metadata too large")
+				}
+			}
+			if rpc.Iwant != nil {
+				if len(rpc.Iwant.Metadata) > 1024 {
+					return errors.New("metadata too large")
+				}
 			}
 			return nil
 		},
@@ -658,10 +665,9 @@ func TestPartialMessages(t *testing.T) {
 		h1.sendRPC(peer2, &RPC{
 			RPC: pubsub_pb.RPC{
 				Partial: &pubsub_pb.PartialMessagesExtension{
-					Idontwant: &pubsub_pb.PartialIDONTWANT{
-						TopicID: &topic,
-						GroupID: fullMsg.GroupID(),
-					},
+					TopicID:   &topic,
+					GroupID:   fullMsg.GroupID(),
+					Idontwant: &pubsub_pb.PartialIDONTWANT{},
 				},
 			},
 		}, false)

@@ -8,12 +8,9 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
-// TODO: Handle PartialIDONTWANT
 // TODO: Add gossip fallback
 // TODO: Limit number of concurrent PartialIWANTs.
 // TODO: Move this to a separate package?
-// TODO: Validate topic.
-// 	 - How do integrate this with existing mechanism in pubsub?
 // TODO: Add invariant tester for PartialMessages interface
 //   - Add check for requesting parts you don't have to result in a nil response
 //   - Add check that PartialMessageBytesFromMetadata properly returns the "rest" of the request
@@ -129,9 +126,12 @@ type PartialMessageExtension struct {
 	NewPartialMessage func(topic string, groupID []byte) (PartialMessage, error)
 
 	// ValidateRequestMetadata should be a fast function that performs some
-	// basic sanity checks on the opaque request metadata. Checking that it is
-	// within some size limit is recommended.
-	ValidateRequestMetadata func(topic string, metadata []byte) error
+	// basic sanity checks on incoming RPC. For example:
+	//   - Is this a known topic?
+	//   - Is the groupID well formed per application semantics?
+	//   - If this is a PartialIHAVE/PartialIWant, is the request metadata within
+	//     expected bounds?
+	ValidateRPC func(from peer.ID, rpc *pb.PartialMessagesExtension) error
 
 	// GroupTTLByHeatbeat is how many heartbeats we store Group state for.
 	GroupTTLByHeatbeat int
@@ -198,9 +198,7 @@ func (e *PartialMessageExtension) PublishPartial(topic string, partial PartialMe
 	var eagerPush *pb.PartialMessage
 	if len(opts.EagerPush) > 0 {
 		eagerPush = &pb.PartialMessage{
-			TopicID: &topic,
-			GroupID: groupID,
-			Data:    opts.EagerPush,
+			Data: opts.EagerPush,
 		}
 	}
 
@@ -208,8 +206,6 @@ func (e *PartialMessageExtension) PublishPartial(topic string, partial PartialMe
 	if len(ihave) > 0 && !bytes.Equal(ihave, state.lastHave) {
 		state.lastHave = ihave
 		partialIHAVE = &pb.PartialIHAVE{
-			TopicID:  &topic,
-			GroupID:  groupID,
 			Metadata: ihave,
 		}
 	}
@@ -217,8 +213,6 @@ func (e *PartialMessageExtension) PublishPartial(topic string, partial PartialMe
 	var partialIWANT *pb.PartialIWANT
 	if len(iwant) > 0 {
 		partialIWANT = &pb.PartialIWANT{
-			TopicID:  &topic,
-			GroupID:  groupID,
 			Metadata: iwant,
 		}
 	}
@@ -250,10 +244,10 @@ func (e *PartialMessageExtension) PublishPartial(topic string, partial PartialMe
 			e.sendRPC(p, &RPC{
 				RPC: pb.RPC{
 					Partial: &pb.PartialMessagesExtension{
+						TopicID: &topic,
+						GroupID: groupID,
 						Message: &pb.PartialMessage{
-							TopicID: &topic,
-							GroupID: groupID,
-							Data:    pm,
+							Data: pm,
 						},
 						// Also send them what we want
 						Iwant: partialIWANT,
@@ -301,6 +295,8 @@ func (e *PartialMessageExtension) PublishPartial(topic string, partial PartialMe
 		}
 
 		if added {
+			rpc.Partial.TopicID = &topic
+			rpc.Partial.GroupID = groupID
 			e.sendRPC(p, &rpc, false)
 		}
 	}
@@ -327,9 +323,9 @@ func (e *PartialMessageExtension) AddPeer(id peer.ID) {
 					e.sendRPC(id, &RPC{
 						RPC: pb.RPC{
 							Partial: &pb.PartialMessagesExtension{
+								TopicID: &topic,
+								GroupID: state.partialMessage.GroupID(),
 								Iwant: &pb.PartialIWANT{
-									TopicID:  &topic,
-									GroupID:  state.partialMessage.GroupID(),
 									Metadata: iwant,
 								},
 							},
@@ -369,29 +365,24 @@ func (e *PartialMessageExtension) HandleRPC(rpc *RPC) error {
 		return nil
 	}
 	peerID := rpc.from
+	if err := e.ValidateRPC(peerID, rpc.Partial); err != nil {
+		return err
+	}
+	topic := rpc.Partial.GetTopicID()
+	groupID := rpc.Partial.GroupID
+
+	state, err := e.groupState(topic, groupID)
+	if err != nil {
+		return err
+	}
 
 	if rpc.Partial.Message != nil {
-		pbMsg := rpc.Partial.Message
-		state, err := e.groupState(pbMsg.GetTopicID(), pbMsg.GroupID)
-		if err != nil {
-			return err
-		}
-		state.partialMessage.ExtendFromEncodedPartialMessage(pbMsg.Data)
+		state.partialMessage.ExtendFromEncodedPartialMessage(rpc.Partial.Message.Data)
 	}
 
 	if rpc.Partial.Iwant != nil {
-		pbMsg := rpc.Partial.Iwant
-		topic := pbMsg.GetTopicID()
-		groupID := pbMsg.GroupID
-		iwant := pbMsg.Metadata
-		if err := e.ValidateRequestMetadata(topic, iwant); err != nil {
-			return err
-		}
-		state, err := e.groupState(topic, groupID)
-		if err != nil {
-			return err
-		}
-		iwantResponse, iwant, err := state.partialMessage.PartialMessageBytesFromMetadata(pbMsg.Metadata)
+		iwant := rpc.Partial.Iwant.Metadata
+		iwantResponse, iwant, err := state.partialMessage.PartialMessageBytesFromMetadata(iwant)
 		if err != nil {
 			return err
 		}
@@ -401,10 +392,10 @@ func (e *PartialMessageExtension) HandleRPC(rpc *RPC) error {
 			e.sendRPC(peerID, &RPC{
 				RPC: pb.RPC{
 					Partial: &pb.PartialMessagesExtension{
+						TopicID: &topic,
+						GroupID: groupID,
 						Message: &pb.PartialMessage{
-							TopicID: &topic,
-							GroupID: groupID,
-							Data:    iwantResponse,
+							Data: iwantResponse,
 						},
 					},
 				},
@@ -415,22 +406,13 @@ func (e *PartialMessageExtension) HandleRPC(rpc *RPC) error {
 	}
 
 	if rpc.Partial.Ihave != nil {
-		ihaveMsg := rpc.Partial.Ihave
-		topic := ihaveMsg.GetTopicID()
-		groupID := ihaveMsg.GroupID
-		if err := e.ValidateRequestMetadata(topic, ihaveMsg.Metadata); err != nil {
-			return err
-		}
-		state, err := e.groupState(topic, groupID)
-		if err != nil {
-			return err
-		}
+		ihave := rpc.Partial.Ihave.Metadata
 		peerState, ok := state.peerState[peerID]
 		if !ok {
 			peerState = &partialMessagePeerState{}
 			state.peerState[peerID] = peerState
 		}
-		peerState.has = ihaveMsg.Metadata
+		peerState.has = ihave
 		if state.partialMessage.ShouldRequest(peerState.has) {
 			iwant, err := state.partialMessage.MissingParts()
 			if err != nil {
@@ -443,9 +425,9 @@ func (e *PartialMessageExtension) HandleRPC(rpc *RPC) error {
 					e.sendRPC(peerID, &RPC{
 						RPC: pb.RPC{
 							Partial: &pb.PartialMessagesExtension{
+								TopicID: &topic,
+								GroupID: groupID,
 								Iwant: &pb.PartialIWANT{
-									TopicID:  &topic,
-									GroupID:  groupID,
 									Metadata: iwant,
 								},
 							},
@@ -457,12 +439,6 @@ func (e *PartialMessageExtension) HandleRPC(rpc *RPC) error {
 	}
 
 	if rpc.Partial.Idontwant != nil {
-		topic := rpc.Partial.Idontwant.GetTopicID()
-		groupID := rpc.Partial.Idontwant.GroupID
-		state, err := e.groupState(topic, groupID)
-		if err != nil {
-			return err
-		}
 		peerState, ok := state.peerState[peerID]
 		if !ok {
 			peerState = &partialMessagePeerState{}
