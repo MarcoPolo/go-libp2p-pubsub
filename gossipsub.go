@@ -260,7 +260,7 @@ func NewGossipSubWithRouter(ctx context.Context, h host.Host, rt PubSubRouter, o
 // DefaultGossipSubRouter returns a new GossipSubRouter with default parameters.
 func DefaultGossipSubRouter(h host.Host) *GossipSubRouter {
 	params := DefaultGossipSubParams()
-	return &GossipSubRouter{
+	rt := &GossipSubRouter{
 		peers:        make(map[peer.ID]protocol.ID),
 		mesh:         make(map[string]map[peer.ID]struct{}),
 		fanout:       make(map[string]map[peer.ID]struct{}),
@@ -281,6 +281,14 @@ func DefaultGossipSubRouter(h host.Host) *GossipSubRouter {
 		tagTracer:    newTagTracer(h.ConnManager()),
 		params:       params,
 	}
+
+	rt.extensions = newExtensionsState(PeerExtensions{}, func(p peer.ID) {
+		if rt.score != nil {
+			rt.score.AddPenalty(p, 10)
+		}
+	}, rt.sendRPC)
+
+	return rt
 }
 
 // DefaultGossipSubParams returns the default gossip sub parameters
@@ -466,8 +474,10 @@ func WithGossipSubParams(cfg GossipSubParams) Option {
 // is the fanout map. Fanout peer lists are expired if we don't publish any
 // messages to their topic for GossipSubFanoutTTL.
 type GossipSubRouter struct {
-	p            *PubSub
-	peers        map[peer.ID]protocol.ID          // peer protocols
+	p          *PubSub
+	peers      map[peer.ID]protocol.ID // peer protocols
+	extensions *extensionsState
+
 	direct       map[peer.ID]struct{}             // direct peers
 	mesh         map[string]map[peer.ID]struct{}  // topic meshes
 	fanout       map[string]map[peer.ID]struct{}  // topic fanout
@@ -652,13 +662,18 @@ loop:
 		}
 	}
 	gs.outbound[p] = outbound
-
+	if gs.feature(GossipSubFeatureExtensions, proto) {
+		helloPacket = gs.extensions.AddPeer(p, helloPacket)
+	}
 	return helloPacket
 }
 
 func (gs *GossipSubRouter) RemovePeer(p peer.ID) {
 	log.Debugf("PEERDOWN: Remove disconnected peer %s", p)
 	gs.tracer.RemovePeer(p)
+	if gs.feature(GossipSubFeatureExtensions, gs.peers[p]) {
+		gs.extensions.RemovePeer(p)
+	}
 	delete(gs.peers, p)
 	for _, peers := range gs.mesh {
 		delete(peers, p)
@@ -748,6 +763,8 @@ func (gs *GossipSubRouter) Preprocess(from peer.ID, msgs []*Message) {
 }
 
 func (gs *GossipSubRouter) HandleRPC(rpc *RPC) {
+	gs.extensions.HandleRPC(rpc)
+
 	ctl := rpc.GetControl()
 	if ctl == nil {
 		return
